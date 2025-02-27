@@ -304,100 +304,47 @@ def raycast_wgs84(position: tuple[float, float, float], orientation: Rotation) -
 	return (intersection_pos[1], intersection_pos[0], intersection_pos[2])
 
 
-def perspective_matrix(fov: float, aspect_ratio: float, near: float, far: float) -> np.ndarray:
+def pix_to_ang(pixel: tuple[float, float], resolution: tuple[int, int], fov: float) -> tuple[float, float]:
 	'''
-	fov - The camera's vertical field of view (radians)
+	Given a row [0, rows] and column [0, cols] in the frame of the camera, calculate the azimuth
+	[pi/2, -pi/2] and elevation [pi/2, -pi/2] of the pixel relative to the camera's center.
 
-	aspect_ratio - The camera's aspect_ratio (horizontal_size / vertical_size)
+	The origin is assumed to be the top-left of the image, and pixel coordinates are assumed to
+	represent the top-left of the pixel. To get the center of the pixel, add (0.5, 0.5) to the
+	coordinate.
 
-	near - The near plane distance
+	Parameters
+	----------
+		pixel : The coordinate of the target pixel (row, column)
 
-	far - The far plane distance
-	'''
+		resolution : The resolution of the camera (rows, columns)
 
-	# This projection matrix follows OpenGL conventions. This means it defaults to looking down the
-	# negative direction of the Z-axis of OpenGL's conventional right-handed coordinate frame. These
-	# coordinates have an X-axis pointing to the right, a Y-axis pointing up, and a Z-axis pointing
-	# backwards. The projection matrix keeps with the conventional OpenGL usage in that it will flip
-	# coordinates to a left-handed frame where the Z-axis now points forward.
-	#
-	# The coordinate frame before perspective transformation is as depicted below. As mentioned
-	# above, note that the camera points down the negative Z-axis.
-	#
-	#              Y(up)
-	#              %
-	#              %           Camera Direction
-	#              %         .
-	#              %       .
-	#              %     .
-	#              %   .
-	#              % .
-	#              %%%%%%%%%%%%%%%% X(right)
-	#            %
-	#          %
-	#        %
-	#      %
-	#    %
-	#  Z(back)
-	#
-	# After perspective transformation, the coordinate frame will be as depicted below. The flipped
-	# Z-axis means that coordinates which had a negative Z value previously will now be positive.
-	#
-	#  Y(up)
-	#  %
-	#  %           Z(forward)
-	#  %         %
-	#  %       %
-	#  %     %
-	#  %   %
-	#  % %
-	#  %%%%%%%%%%%%%%% X(right)
+		fov : The camera's vertical field of view (radians)
 
-	tan_half_fov = math.tan(fov / 2.0)
-
-	return np.array([
-		[1 / (aspect_ratio * tan_half_fov), 0,                0,                                   0],
-		[0,                                 1 / tan_half_fov, 0,                                   0],
-		[0,                                 0,                (-(far + near)) / (far - near),     -1],
-		[0,                                 0,                (-(2 * far * near)) / (far - near),  0]
-	])
-
-
-def normalize_coordinate(coord: tuple[float, float], image_size: tuple[int, int]) -> tuple[float, float]:
-	'''
-	Translate pixel coordinates (row, column) to normalized [-1, 1] clip space coordinates. Normalized clip space
-	have a top-left (x, y) value of (-1, 1), and a bottom-right value of (1, -1). The pixel coordinates are assumed to
-	represent the top-left of the pixel. For the center of the pixel, add (0.5, 0.5) to the coordinate.
+	Returns
+	-------
+	The azimuth [pi/2, -pi/2] and elevation [pi/2, -pi/2] of the target pixel relative to the
+	camera's center viewpoint.
 	'''
 
-	row_x = [0, image_size[0]]
-	col_x = [0, image_size[1]]
+	# Aspect ratio: horizontal / vertical
+	aspect_ratio = float(resolution[1]) / resolution[0]
 
-	row_y = [1, -1]
-	col_y = [-1, 1]
+	fx = (resolution[1] / 2) / math.tan((fov * aspect_ratio) / 2)
+	#fy = (resolution[0] / 2) / math.tan(fov / 2)
 
-	interp_row = np.interp(coord[0], row_x, row_y)
-	interp_col = np.interp(coord[1], col_x, col_y)
+	cx = resolution[1] / 2
+	cy = resolution[0] / 2
 
-	return [interp_row, interp_col]
+	# This order of subtraction implies that the x-axis is positive going left and the y-axis is
+	# positive going down. To reverse these, subtract the center from the pixel coordinate instead.
+	dx = cx - pixel[1]
+	dy = cy - pixel[0]
 
+	az = math.atan(dx / fx)
+	el = math.atan(dy / math.sqrt((dx ** 2) + (fx ** 2)))
 
-def pix_to_ang(pix: tuple[float, float], inv_projection: np.ndarray) -> tuple[float, float]:
-	'''
-	This function takes a row [1, -1] and column [-1, 1] in the frame of the camera defined by the
-	provided projection matrix, and outputs the azimuth [pi/2, -pi/2] and elevation [pi/2, -pi/2] of
-	the pixel relative to the camera's center.
-	'''
-
-	# Unproject the 2D image coordinate (in the normalized [-1, 1] range) into camera-relative
-	# cartesian space.
-	vertex_camera = np.dot([pix[1], pix[0], 0, 1], inv_projection)
-	(x, y, z) = vertex_camera[0:3] / vertex_camera[3]
-
-	# Convert the cartesian coordinate to spherical. The range is not needed. The coordinates will
-	# be in OpenGL's conventional coordinate frame, so the axis rearranging here is needed to get
-	# sensible output from cart2sph.
-	return pymap3d.utils.cart2sph(-z, -x, y)[0:2]
+	return (az, el)
 
 
 def pix_to_geo(
@@ -409,25 +356,29 @@ def pix_to_geo(
 	elevation_data: rasterio.DatasetReader
 ) -> tuple[float, float, float] | None:
 	'''
-	pix - The pixel coordinate (row, column). A top-left image origin is assumed.
+	Given the coordinate of a pixel within a camera's image, calculate the geographic coordinate
+	of the intersection of the pixel's viewpoint with the terrain.
 
-	camera_resolution - The resolution of the camera (rows, columns)
+	If this function fails to intersect the given elevation dataset, it will attempt to intersect
+	the WGS84 ellipsoid as a fallback.
 
-	vertical_fov - The camera's vertical field of view (radians)
+	Parameters
+	----------
+	pix : The pixel coordinate (row, column). A top-left image origin is assumed.
 
-	camera_lla - The LLA position of the center of the camera's imaging sensor
+	camera_resolution : The resolution of the camera (rows, columns)
 
-	camera_orientation - The orientation of the camera's imaging sensor relative to the NED frame
+	vertical_fov : The camera's vertical field of view (radians)
 
-	elevation_data - The elevation raster file
+	camera_lla : The LLA position of the center of the camera's imaging sensor
+
+	camera_orientation : The orientation of the camera's imaging sensor relative to the NED frame
+
+	elevation_data : The elevation raster file
 	'''
 
-	# The pixel coordinate needs to be normalized for pix_to_ang
-	normalized_pix = normalize_coordinate(pix, camera_resolution)
-
 	# Convert the pixel coordinate into an azimuth and elevation relative to the camera center
-	projection = perspective_matrix(vertical_fov, float(camera_resolution[1]) / camera_resolution[0], 1, 1000)
-	(az, el) = pix_to_ang(normalized_pix, np.linalg.inv(projection))
+	(az, el) = pix_to_ang(pix, camera_resolution, vertical_fov)
 
 	# Calculate the total orientation of the pixel in the NED frame
 	pixel_orientation = camera_orientation * Rotation.from_euler('ZY', (-az, -el))
@@ -453,6 +404,8 @@ if __name__ == '__main__':
 	parser = argparse.ArgumentParser(description='Resolve a target location from a position and orientation using a GeoTIFF dataset')
 	parser.add_argument('-p', '--position', type=float, nargs=3, metavar=('lat', 'lon', 'alt'), required=True, help='Latitude, longitude, and altitude of the source in degrees and meters')
 	parser.add_argument('-o', '--orientation', type=float, nargs=2, metavar=('yaw', 'pitch'), required=True, help='Yaw and pitch angle in degrees')
+	parser.add_argument('-r', '--resolution', type=int, nargs=2, metavar=('rows', 'cols'), required=True, help='The resolution of the camera')
+	parser.add_argument('-x', '--pixel', type=float, nargs=2, metavar=('row', 'col'), required=True, help='The coordiante of the target pixel')
 	parser.add_argument('-g', '--geotiff', type=str, required=True, help='Path to a GeoTIFF file for terrain data')
 	#parser.add_argument('-v', '--verbose', action='store_true')
 
@@ -463,10 +416,11 @@ if __name__ == '__main__':
 
 	t0 = time.time()
 
-	#result = raycast_elevation_map(args.position, rotation, elevation_data)
-	result = pix_to_geo([500, 500], [1000, 1000], math.pi / 2, args.position, rotation, elevation_data)
+	result = pix_to_geo(args.pixel, args.resolution, math.pi / 2, args.position, rotation, elevation_data)
 
-	logger.info(f'Execution time: {round((time.time() - t0) * 1000, 3)}ms')
+	t1 = time.time()
+
+	logger.info(f'Execution time: {round((t1 - t0) * 1000, 3)}ms')
 
 	if result is not None:
 		logger.opt(colors=True).info(f'<green>Ray intersection: {result}</green>')
