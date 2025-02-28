@@ -404,8 +404,9 @@ if __name__ == '__main__':
 	parser = argparse.ArgumentParser(description='Resolve a target location from a position and orientation using a GeoTIFF dataset')
 	parser.add_argument('-p', '--position', type=float, nargs=3, metavar=('lat', 'lon', 'alt'), required=True, help='Latitude, longitude, and altitude of the source in degrees and meters')
 	parser.add_argument('-o', '--orientation', type=float, nargs=2, metavar=('yaw', 'pitch'), required=True, help='Yaw and pitch angle in degrees')
-	parser.add_argument('-r', '--resolution', type=int, nargs=2, metavar=('rows', 'cols'), required=True, help='The resolution of the camera')
 	parser.add_argument('-x', '--pixel', type=float, nargs=2, metavar=('row', 'col'), required=True, help='The coordiante of the target pixel')
+	parser.add_argument('-r', '--resolution', type=int, nargs=2, metavar=('rows', 'cols'), required=True, help='The resolution of the camera')
+	parser.add_argument('-f', '--fov', type=float, required=True, help='The vertical FOV of the camera (radians)')
 	parser.add_argument('-g', '--geotiff', type=str, required=True, help='Path to a GeoTIFF file for terrain data')
 	#parser.add_argument('-v', '--verbose', action='store_true')
 
@@ -416,7 +417,7 @@ if __name__ == '__main__':
 
 	t0 = time.time()
 
-	result = pix_to_geo(args.pixel, args.resolution, math.pi / 2, args.position, rotation, elevation_data)
+	result = pix_to_geo(args.pixel, args.resolution, args.fov, args.position, rotation, elevation_data)
 
 	t1 = time.time()
 
